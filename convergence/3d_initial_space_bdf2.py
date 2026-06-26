@@ -8,14 +8,8 @@ import numpy as np
 import time
 from ufl import TrialFunctions, TestFunctions, inner, grad, cross
 
-
-def ue(x):
-    # Smooth unit-length initial magnetization on the 3D box.
-    comp1 = np.sin(np.pi * x[0]) * np.cos(2 * np.pi * x[1]) + np.cos(np.pi * x[2]) ** 2 + 1
-    comp2 = np.cos(2 * np.pi * x[0]) * np.cos(2 * np.pi * x[1]) + 2
-    comp3 = np.sin(np.pi * x[1]) * np.cos(np.pi * x[2]) ** 2 + np.sin(np.pi * x[0])
-    norm = np.sqrt(comp1**2 + comp2**2 + comp3**2)
-    return np.vstack([comp1, comp2, comp3]) / norm
+from error_analysis import compute_space_errors_and_rates
+from initial_data_convergence import ue
 
 
 def _project_to_unit_sphere(m_h):
@@ -27,22 +21,6 @@ def _project_to_unit_sphere(m_h):
     values[1::3] /= norms
     values[2::3] /= norms
     m_h.x.scatter_forward()
-
-
-def build_problem_spaces(mesh_n, order, comm):
-    domain = mesh.create_box(
-        comm,
-        [np.array([0.5, 0.5, 0.5]), np.array([1.5, 1.5, 1.5])],
-        [mesh_n, mesh_n, mesh_n],
-        mesh.CellType.hexahedron,
-    )
-    dx_lumped = ufl.dx(metadata={"quadrature_rule": "GLL", "quadrature_degree": 2 * order - 1})
-
-    element = basix.ufl.element("Q", domain.basix_cell(), order, shape=(3,))
-    V = fem.functionspace(domain, element)
-    W = fem.functionspace(domain, basix.ufl.mixed_element([element, element]))
-
-    return domain, V, W, dx_lumped
 
 
 def llg(num_steps, V, W, dx_lumped, total_time, comm=MPI.COMM_WORLD):
@@ -127,94 +105,6 @@ def llg(num_steps, V, W, dx_lumped, total_time, comm=MPI.COMM_WORLD):
     return sol_history
 
 
-def _validate_space_histories(solutions_coarse, solutions_fine):
-    if len(solutions_coarse) == 0:
-        raise ValueError("solutions_coarse must not be empty")
-    if len(solutions_coarse) != len(solutions_fine):
-        raise ValueError(
-            f"Time history mismatch: coarse={len(solutions_coarse)}, "
-            f"fine={len(solutions_fine)}"
-        )
-
-
-def _elapsed_max(comm, start_time):
-    # Use the slowest MPI rank as the reported parallel runtime.
-    return comm.allreduce(time.perf_counter() - start_time, op=MPI.MAX)
-
-
-def compute_space_errors_and_rates(
-    solutions_coarse,
-    solutions_fine,
-    V_fine,
-    domain_fine,
-    fine_cells,
-    interpolation_data,
-    dt,
-    previous_errors=None,
-    refinement_ratio=None,
-):
-    # Interpolate each coarse solution to the fine mesh, then compute
-    # final-time and full-history errors in one pass.
-    _validate_space_histories(solutions_coarse, solutions_fine)
-
-    dx = ufl.Measure("dx", domain=domain_fine)
-    m_coarse_on_fine = fem.Function(V_fine)
-    diff = fem.Function(V_fine)
-    error_L2_sq_form = fem.form(inner(diff, diff) * dx)
-    error_grad_sq_form = fem.form(inner(grad(diff), grad(diff)) * dx)
-
-    L2H1_error_sq = 0.0
-    LinfL2_error = 0.0
-    max_index = 0
-    final_L2_error = 0.0
-    final_H1_error = 0.0
-    final_index = len(solutions_coarse) - 1
-
-    for n in range(len(solutions_coarse)):
-        m_coarse_on_fine.interpolate_nonmatching(
-            solutions_coarse[n],
-            fine_cells,
-            interpolation_data,
-        )
-        diff.x.array[:] = m_coarse_on_fine.x.array - solutions_fine[n].x.array
-        diff.x.scatter_forward()
-
-        error_L2_sq = domain_fine.comm.allreduce(fem.assemble_scalar(error_L2_sq_form), op=MPI.SUM)
-        error_grad_sq = domain_fine.comm.allreduce(fem.assemble_scalar(error_grad_sq_form), op=MPI.SUM)
-        error_H1_sq = error_L2_sq + error_grad_sq
-        error_L2 = np.sqrt(error_L2_sq)
-
-        L2H1_error_sq += dt * error_H1_sq
-        if error_L2 > LinfL2_error:
-            LinfL2_error = error_L2
-            max_index = n
-
-        if n == final_index:
-            final_L2_error = error_L2
-            final_H1_error = np.sqrt(error_H1_sq)
-
-    errors = {
-        "final_L2": final_L2_error,
-        "final_H1": final_H1_error,
-        "L2H1": np.sqrt(L2H1_error_sq),
-        "LinfL2": LinfL2_error,
-        "LinfL2_index": max_index,
-        "rates": None,
-    }
-
-    if previous_errors is not None:
-        if refinement_ratio is None:
-            raise ValueError("refinement_ratio is required when previous_errors is provided")
-        errors["rates"] = {
-            "final_L2": np.log(previous_errors["final_L2"] / errors["final_L2"]) / np.log(refinement_ratio),
-            "final_H1": np.log(previous_errors["final_H1"] / errors["final_H1"]) / np.log(refinement_ratio),
-            "L2H1": np.log(previous_errors["L2H1"] / errors["L2H1"]) / np.log(refinement_ratio),
-            "LinfL2": np.log(previous_errors["LinfL2"] / errors["LinfL2"]) / np.log(refinement_ratio),
-        }
-
-    return errors
-
-
 def main():
     start_time = time.perf_counter()
 
@@ -227,7 +117,6 @@ def main():
     dt = total_time / num_steps
 
     solution_cache = {}
-    solve_times = {}
     error_records = []
 
     def get_solution_data(mesh_n):
@@ -236,12 +125,20 @@ def main():
         if mesh_n not in solution_cache:
             if MPI.COMM_WORLD.rank == 0:
                 print(f"\nSolving mesh {mesh_n}x{mesh_n}x{mesh_n} with {num_steps} time steps")
-            solve_start = time.perf_counter()
 
-            domain, V, W, dx_lumped = build_problem_spaces(mesh_n, order, MPI.COMM_WORLD)
+            domain = mesh.create_box(
+                MPI.COMM_WORLD,
+                [np.array([0.5, 0.5, 0.5]), np.array([1.5, 1.5, 1.5])],
+                [mesh_n, mesh_n, mesh_n],
+                mesh.CellType.hexahedron,
+            )
+            dx_lumped = ufl.dx(metadata={"quadrature_rule": "GLL", "quadrature_degree": 2 * order - 1})
+            element = basix.ufl.element("Q", domain.basix_cell(), order, shape=(3,))
+            V = fem.functionspace(domain, element)
+            W = fem.functionspace(domain, basix.ufl.mixed_element([element, element]))
+
             history = llg(num_steps, V, W, dx_lumped, total_time, domain.comm)
 
-            solve_times[mesh_n] = _elapsed_max(domain.comm, solve_start)
             solution_cache[mesh_n] = {
                 "domain": domain,
                 "V": V,
@@ -250,12 +147,8 @@ def main():
             if MPI.COMM_WORLD.rank == 0:
                 global_dofs = V.dofmap.index_map.size_global * 3
                 print(f"  global vector DOFs: {global_dofs:,}")
-                print(f"  solve time: {solve_times[mesh_n]:.2f} s")
         elif MPI.COMM_WORLD.rank == 0:
-            print(
-                f"\nReusing mesh {mesh_n}x{mesh_n}x{mesh_n} solution "
-                f"(solve time was {solve_times[mesh_n]:.2f} s)"
-            )
+            print(f"\nReusing mesh {mesh_n}x{mesh_n}x{mesh_n} solution")
 
         return solution_cache[mesh_n]
 
@@ -282,7 +175,6 @@ def main():
         if domain_fine.comm.rank == 0:
             print(f"\nComparing mesh {mesh_n_coarse} with mesh {mesh_n_fine}")
 
-        compare_start = time.perf_counter()
         previous_errors = error_records[-1] if error_records else None
         refinement_ratio = mesh_n_coarse / mesh_counts[i - 1] if i > 0 else None
         error_record = compute_space_errors_and_rates(
@@ -296,7 +188,6 @@ def main():
             previous_errors=previous_errors,
             refinement_ratio=refinement_ratio,
         )
-        compare_time = _elapsed_max(domain_fine.comm, compare_start)
         error_records.append(error_record)
 
         if domain_fine.comm.rank == 0:
@@ -310,10 +201,8 @@ def main():
                 f"{max_linf_index + 1}/{num_steps}, "
                 f"t={(max_linf_index + 1) * dt:.4e}"
             )
-            print(f"  comparison time: {compare_time:.2f} s")
 
-    solve_total = sum(solve_times.values())
-    total_time_elapsed = _elapsed_max(MPI.COMM_WORLD, start_time)
+    elapsed_time = time.perf_counter() - start_time
 
     if MPI.COMM_WORLD.rank == 0:
         print("\n=== Final-time spatial convergence rates ===")
@@ -335,8 +224,7 @@ def main():
             print(f"  L^infty(0,T;L^2) rate = {rates['LinfL2']:.4f}")
 
         print("\n=== Timing ===")
-        print(f"  Total solve time: {solve_total:.2f} s")
-        print(f"  Total elapsed time: {total_time_elapsed:.2f} s")
+        print(f"  Elapsed time: {elapsed_time:.2f} s")
 
 
 if __name__ == "__main__":
