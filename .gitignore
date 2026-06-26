@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+
+# Local Codex/workspace metadata
+.agents/
+.codex/
+
+# Python environments
+.venv/
+venv/
+env/
+
+# Generated mesh/output files
+*.xdmf
+*.h5
+**/energy_*.txt
+**/w1infty_*.txt
+**/m_tilde_norm_*.txt
+**/summary_*.txt
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
