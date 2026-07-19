@@ -28,6 +28,7 @@ def llg(
     W,
     dx_lumped,
     total_time,
+    alpha,
     comm=MPI.COMM_WORLD,
 ):
     # Return the full time history [m^1, ..., m^N].
@@ -56,7 +57,8 @@ def llg(
     # One BDF1 startup step from m^0 to m^1.
     bdf1_rhs = (1.0 / dt) * inner(m_h, v_h) * dx_lumped
     bdf1_lhs = (1.0 / dt) * inner(m_h_tilde, v_h) * dx_lumped \
-        + inner(cross(m_h, cross(m_h, delta_h_m_tilde)), v_h) * dx_lumped \
+        + inner(cross(m_h, delta_h_m_tilde), v_h) * dx_lumped \
+        + alpha * inner(cross(m_h, cross(m_h, delta_h_m_tilde)), v_h) * dx_lumped \
         + inner(delta_h_m_tilde, bar_v_h) * dx_lumped \
         + inner(grad(m_h_tilde), grad(bar_v_h)) * dx_lumped
     bdf1_problem = LinearProblem(
@@ -70,7 +72,8 @@ def llg(
     # Functions, so their updated vector values are used at each solve.
     bdf2_rhs = (1.0 / (2.0 * dt)) * inner(4.0 * m_h - m_h_prev, v_h) * dx_lumped
     bdf2_lhs = (3.0 / (2.0 * dt)) * inner(m_h_tilde, v_h) * dx_lumped \
-        + inner(cross(m_h_hat, cross(m_h_hat, delta_h_m_tilde)), v_h) * dx_lumped \
+        + inner(cross(m_h_hat, delta_h_m_tilde), v_h) * dx_lumped \
+        + alpha * inner(cross(m_h_hat, cross(m_h_hat, delta_h_m_tilde)), v_h) * dx_lumped \
         + inner(delta_h_m_tilde, bar_v_h) * dx_lumped \
         + inner(grad(m_h_tilde), grad(bar_v_h)) * dx_lumped
     bdf2_problem = LinearProblem(
@@ -114,6 +117,7 @@ def main():
     order = 1
     mesh_n = 16
     total_time = 0.05
+    alpha = 1.0
 
     error_records = []
 
@@ -144,6 +148,7 @@ def main():
                 W,
                 dx_lumped,
                 total_time,
+                alpha,
                 domain.comm,
             )
         elif domain.comm.rank == 0:

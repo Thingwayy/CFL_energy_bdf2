@@ -22,7 +22,7 @@ def _project_to_unit_sphere(m_h):
     m_h.x.scatter_forward()
 
 
-def llg(num_steps, V, W, dx_lumped, total_time, comm=MPI.COMM_WORLD):
+def llg(num_steps, V, W, dx_lumped, total_time, alpha, comm=MPI.COMM_WORLD):
     # Return the full time history [m^1, ..., m^N].
     if num_steps <= 0:
         raise ValueError("num_steps must be positive")
@@ -54,7 +54,8 @@ def llg(num_steps, V, W, dx_lumped, total_time, comm=MPI.COMM_WORLD):
     # One BDF1 startup step from m^0 to m^1.
     bdf1_rhs = (1.0 / dt) * inner(m_h, v_h) * dx_lumped
     bdf1_lhs = (1.0 / dt) * inner(m_h_tilde, v_h) * dx_lumped \
-        + inner(cross(m_h, cross(m_h, delta_h_m_tilde)), v_h) * dx_lumped \
+        + inner(cross(m_h, delta_h_m_tilde), v_h) * dx_lumped \
+        + alpha * inner(cross(m_h, cross(m_h, delta_h_m_tilde)), v_h) * dx_lumped \
         + inner(delta_h_m_tilde, bar_v_h) * dx_lumped \
         + inner(grad(m_h_tilde), grad(bar_v_h)) * dx_lumped
     bdf1_problem = LinearProblem(
@@ -68,7 +69,8 @@ def llg(num_steps, V, W, dx_lumped, total_time, comm=MPI.COMM_WORLD):
     # m_h_hat are Functions, so updated vector values enter every solve.
     bdf2_rhs = (1.0 / (2.0 * dt)) * inner(4.0 * m_h - m_h_prev, v_h) * dx_lumped
     bdf2_lhs = (3.0 / (2.0 * dt)) * inner(m_h_tilde, v_h) * dx_lumped \
-        + inner(cross(m_h_hat, cross(m_h_hat, delta_h_m_tilde)), v_h) * dx_lumped \
+        + inner(cross(m_h_hat, delta_h_m_tilde), v_h) * dx_lumped \
+        + alpha * inner(cross(m_h_hat, cross(m_h_hat, delta_h_m_tilde)), v_h) * dx_lumped \
         + inner(delta_h_m_tilde, bar_v_h) * dx_lumped \
         + inner(grad(m_h_tilde), grad(bar_v_h)) * dx_lumped
     bdf2_problem = LinearProblem(
@@ -108,10 +110,11 @@ def main():
 
     # Experiment parameters. step_counts are coarse time steps; each is
     # compared against its 2x refined solve.
-    step_counts = [120, 240]
+    step_counts = [60, 120, 240, 480, 960]
     order = 1
     mesh_n = 12
     total_time = 0.05
+    alpha = 1.0
 
     domain = mesh.create_box(
         MPI.COMM_WORLD,
@@ -144,6 +147,7 @@ def main():
                 W,
                 dx_lumped,
                 total_time,
+                alpha,
                 domain.comm,
             )
         elif domain.comm.rank == 0:
